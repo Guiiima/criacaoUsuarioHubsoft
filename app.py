@@ -1,5 +1,6 @@
 import os
 import time
+import logging
 import traceback
 from dotenv import load_dotenv
 from selenium import webdriver
@@ -9,314 +10,276 @@ from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
+from selenium.common.exceptions import TimeoutException
 
 load_dotenv()
 
-# Configurações iniciais
-MODO_HEADLESS = False
-EMAIL = os.getenv("HUBSOFT_EMAIL")
-SENHA = os.getenv("HUBSOFT_SENHA")
-NOVA_SENHA_USUARIO = "Mudar@1243!!"
+# Configuração de Logs
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 
-# LISTA DE USUÁRIOS PARA PROCESSAR
-usuarios_para_alterar = [
-    "Teste de Grupos TI",
-    "HubSoft TI",
-]
 
-options = Options()
-if MODO_HEADLESS:
-    options.add_argument("--headless")
-    options.add_argument("--window-size=1920,1080")
-    options.add_argument("--disable-gpu")
+def configurar_driver(headless=False):
+    options = Options()
+    if headless:
+        options.add_argument("--headless")
+        options.add_argument("--window-size=1920,1080")
+        options.add_argument("--disable-gpu")
 
-driver = webdriver.Chrome(options=options)
-if not MODO_HEADLESS:
-    driver.maximize_window()
+    driver = webdriver.Chrome(options=options)
+    if not headless:
+        driver.maximize_window()
+    return driver
 
-wait = WebDriverWait(driver, 25)
-action = ActionChains(driver)
 
-try:
-    print("1. Login...")
-    driver.get("https://directinternet.hubsoft.com.br/login")
-
+def esperar_e_clicar(wait, driver, by, value, nome_elemento):
+    """Tenta clicar de forma normal, se falhar, tenta via JavaScript"""
     try:
-        wait.until(
-            EC.element_to_be_clickable(
-                (By.XPATH, "//input[@type='email' or contains(@name, 'mail')]")
-            )
-        ).send_keys(EMAIL)
+        logging.info(f"--- Tentando clicar em: {nome_elemento}")
+        element = wait.until(EC.element_to_be_clickable((by, value)))
+        element.click()
+        return element
+    except Exception:
+        logging.warning(f"Clique normal falhou em {nome_elemento}. Forçando via JS...")
+        try:
+            element = driver.find_element(by, value)
+            driver.execute_script("arguments[0].click();", element)
+            return element
+        except Exception as e:
+            raise Exception(f"Não foi possível interagir com {nome_elemento}: {e}")
 
-        driver.find_element(By.XPATH, "//button[contains(., 'Validar')]").click()
 
-        wait.until(
-            EC.element_to_be_clickable((By.XPATH, "//input[@type='password']"))
-        ).send_keys(SENHA)
+def realizar_login(driver, wait, email, senha):
+    try:
+        logging.info("Acessando página de login...")
+        driver.get("https://directinternet.hubsoft.com.br/login")
 
-        driver.find_element(By.XPATH, "//button[contains(., 'Entrar')]").click()
+        esperar_e_clicar(
+            wait,
+            driver,
+            By.XPATH,
+            "//input[@type='email' or contains(@name, 'mail')]",
+            "Campo Email",
+        ).send_keys(email)
+        esperar_e_clicar(
+            wait, driver, By.XPATH, "//button[contains(., 'Validar')]", "Botão Validar"
+        )
 
-        print("\n>>> ALERTA: Realize o 2FA no navegador agora.")
-        input(">>> Pressione ENTER aqui após logar com sucesso...")
-        print("Continuando automação...\n")
+        esperar_e_clicar(
+            wait, driver, By.XPATH, "//input[@type='password']", "Campo Senha"
+        ).send_keys(senha)
+        esperar_e_clicar(
+            wait, driver, By.XPATH, "//button[contains(., 'Entrar')]", "Botão Entrar"
+        )
+
+        logging.info(">>> AGUARDANDO 2FA E DASHBOARD (Verifique seu navegador) <<<")
+        wait.until(EC.url_contains("/dashboard"))
+        logging.info("Login confirmado.")
 
     except Exception as e:
-        print(f"Erro no login ou sessão já ativa: {e}")
+        logging.error(f"Falha crítica no login: {e}")
+        raise
 
-    # INÍCIO DO LOOP DE USUÁRIOS
-    for nome_usuario in usuarios_para_alterar:
+
+def alterar_setor(driver, wait, action):
+
+    print("6. Abrindo menu de Setores (Lógica Original)...")
+    # Lógica original usando lambda para achar o elemento visível
+    menu_setores = wait.until(
+        lambda d: [
+            el
+            for el in d.find_elements(By.XPATH, "//md-select[@name='setor']")
+            if el.is_displayed()
+        ][0]
+    )
+    menu_setores.click()
+
+    print("7. Filtrando Setor Suporte...")
+    setor_alvo = "Setor Suporte"
+
+    # Tenta pelo ID original (input_187), mas se falhar, tenta pegar o input de busca genérico visível
+    # para garantir que funcione caso o ID mude dinamicamente.
+    try:
+        campo_filtro = wait.until(EC.element_to_be_clickable((By.ID, "input_187")))
+    except:
+        campo_filtro = wait.until(
+            EC.element_to_be_clickable(
+                (
+                    By.XPATH,
+                    "//md-select-menu[contains(@class,'md-active')]//input[@type='search']",
+                )
+            )
+        )
+
+    campo_filtro.send_keys(Keys.CONTROL + "a")
+    campo_filtro.send_keys(Keys.BACKSPACE)
+    campo_filtro.send_keys(setor_alvo)
+    time.sleep(1)
+
+    print(f"8. Selecionando {setor_alvo}...")
+    xpath_item = f"//button[contains(@aria-label, '{setor_alvo}')]"
+
+    # Loop de rolagem original
+    for _ in range(5):
         try:
-            print("\n" + "=" * 40)
-            print(f"PROCESSANDO: {nome_usuario}")
-            print("=" * 40)
-
-            print("2. Acessando Usuários...")
-            driver.get(
-                "https://directinternet.hubsoft.com.br/configuracao/geral/usuario"
-            )
-
-            print(f"3. Realizando busca do usuário: {nome_usuario}...")
-            campo_busca = wait.until(
-                EC.element_to_be_clickable((By.ID, "configuracao-fiscal-search"))
-            )
-            campo_busca.send_keys(Keys.CONTROL + "a")
-            campo_busca.send_keys(Keys.BACKSPACE)
-            campo_busca.send_keys(nome_usuario)
-
-            time.sleep(2)
-            campo_busca.send_keys(Keys.ENTER)
-            time.sleep(1.5)
-
-            print("4. Abrindo Edição...")
-            botao_acoes = wait.until(
-                EC.element_to_be_clickable((By.XPATH, "//button[@aria-label='Ações']"))
-            )
-            botao_acoes.click()
-
-            botao_editar = wait.until(
-                EC.element_to_be_clickable((By.XPATH, "//button[@aria-label='Editar']"))
-            )
-            botao_editar.click()
-
-            print("5. Alterando Senha...")
-            campo_senha = wait.until(EC.element_to_be_clickable((By.ID, "senha")))
-            campo_senha.click()
-            campo_senha.send_keys(Keys.CONTROL + "a")
-            campo_senha.send_keys(Keys.BACKSPACE)
-            campo_senha.send_keys(NOVA_SENHA_USUARIO)
-
-            campo_confirma = wait.until(
-                EC.element_to_be_clickable((By.ID, "confirmar_senha"))
-            )
-            campo_confirma.click()
-            campo_confirma.send_keys(Keys.CONTROL + "a")
-            campo_confirma.send_keys(Keys.BACKSPACE)
-            campo_confirma.send_keys(NOVA_SENHA_USUARIO)
-
-            print("6. Abrindo menu de Setores...")
-            menu_setores = wait.until(
-                lambda d: [
-                    el
-                    for el in d.find_elements(By.XPATH, "//md-select[@name='setor']")
-                    if el.is_displayed()
-                ][0]
-            )
-            menu_setores.click()
-
-            print("7. Filtrando Setor Suporte...")
-            setor_alvo = "Setor Suporte"
-
-            campo_filtro = wait.until(EC.element_to_be_clickable((By.ID, "input_187")))
-            campo_filtro.send_keys(Keys.CONTROL + "a")
-            campo_filtro.send_keys(Keys.BACKSPACE)
-            campo_filtro.send_keys(setor_alvo)
-            time.sleep(1)
-
-            print(f"8. Selecionando {setor_alvo}...")
-            xpath_item = f"//button[contains(@aria-label, '{setor_alvo}')]"
-
-            for _ in range(5):
-                try:
-                    if driver.find_element(By.XPATH, xpath_item).is_displayed():
-                        break
-                except:
-                    action.send_keys(Keys.PAGE_DOWN).perform()
-                    time.sleep(0.5)
-
-            botao_item = wait.until(
-                EC.presence_of_element_located((By.XPATH, xpath_item))
-            )
-            driver.execute_script(
-                "arguments[0].scrollIntoView({block: 'center'});", botao_item
-            )
+            if driver.find_element(By.XPATH, xpath_item).is_displayed():
+                break
+        except:
+            action.send_keys(Keys.PAGE_DOWN).perform()
             time.sleep(0.5)
 
-            try:
-                botao_item.click()
-            except:
-                driver.execute_script("arguments[0].click();", botao_item)
+    botao_item = wait.until(EC.presence_of_element_located((By.XPATH, xpath_item)))
+    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", botao_item)
+    time.sleep(0.5)
 
-            time.sleep(0.5)
-            action.send_keys(Keys.ESCAPE).perform()
-            time.sleep(2)
+    try:
+        botao_item.click()
+    except:
+        driver.execute_script("arguments[0].click();", botao_item)
 
-            print("9. Acessando aba de Permissões...")
+    time.sleep(0.5)
+    action.send_keys(Keys.ESCAPE).perform()
+    time.sleep(2)
 
-            xpath_permissoes = "//button[@aria-label='PERMISSÕES']"
 
-            try:
-                botao_permissoes = wait.until(
-                    EC.element_to_be_clickable((By.XPATH, xpath_permissoes))
-                )
+def processar_usuario(driver, wait, action, usuario, nova_senha):
+    try:
+        logging.info(f"\nPROCESSANDO: {usuario}")
+        driver.get("https://directinternet.hubsoft.com.br/configuracao/geral/usuario")
 
-                driver.execute_script(
-                    "arguments[0].scrollIntoView({block: 'center'});", botao_permissoes
-                )
-                time.sleep(0.5)
+        logging.info("Aguardando carregamento da tabela...")
+        time.sleep(3)
 
-                botao_permissoes.click()
-                print("Aba Permissões aberta com sucesso.")
+        # 1. BUSCA
+        logging.info("Localizando campo de busca...")
+        campo_busca = wait.until(
+            EC.element_to_be_clickable((By.ID, "configuracao-fiscal-search"))
+        )
+        campo_busca.click()
+        campo_busca.send_keys(Keys.CONTROL + "a")
+        campo_busca.send_keys(Keys.BACKSPACE)
+        campo_busca.send_keys(usuario)
+        time.sleep(1)
+        campo_busca.send_keys(Keys.ENTER)
 
-            except Exception as e:
-                print("Clique padrão falhou, tentando via JavaScript...")
-                botao_permissoes = driver.find_element(By.XPATH, xpath_permissoes)
-                driver.execute_script("arguments[0].click();", botao_permissoes)
+        logging.info("Aguardando filtro...")
+        time.sleep(2)
 
-            time.sleep(1)
+        # 2. ABRIR EDIÇÃO
+        esperar_e_clicar(
+            wait, driver, By.XPATH, "//button[@aria-label='Ações']", "Botão Ações"
+        )
+        time.sleep(0.5)
+        esperar_e_clicar(
+            wait, driver, By.XPATH, "//button[@aria-label='Editar']", "Botão Editar"
+        )
 
-            print("10. Abrindo menu de Setores...")
+        # 3. ALTERAR SENHA
+        logging.info("Alterando senha...")
+        campo_senha = wait.until(EC.element_to_be_clickable((By.ID, "senha")))
+        campo_senha.click()
+        campo_senha.send_keys(Keys.CONTROL + "a")
+        campo_senha.send_keys(Keys.BACKSPACE)
+        campo_senha.send_keys(nova_senha)
 
-            menu_permissao = wait.until(
-                lambda d: [
-                    el
-                    for el in d.find_elements(
-                        By.XPATH, "//md-select[@name='tipo_permissao']"
-                    )
-                    if el.is_displayed()
-                ][0]
+        campo_confirma = wait.until(
+            EC.element_to_be_clickable((By.ID, "confirmar_senha"))
+        )
+        campo_confirma.click()
+        campo_confirma.send_keys(Keys.CONTROL + "a")
+        campo_confirma.send_keys(Keys.BACKSPACE)
+        campo_confirma.send_keys(nova_senha)
+
+        # 4. SETORES (USANDO A LÓGICA ANTIGA)
+        alterar_setor(driver, wait, action)
+
+        # 5. PERMISSÕES
+        # Aqui mantive a versão melhorada, mas se quiser voltar a antiga me avise
+        alterar_permissao(driver, wait, "Setor Suporte")
+
+        # 6. SALVAR
+        logging.info("Salvando...")
+        botao_salvar = wait.until(
+            EC.presence_of_element_located(
+                (By.XPATH, "//button[@type='submit' and @ng-click='vm.save()']")
             )
+        )
+        driver.execute_script("arguments[0].click();", botao_salvar)
 
-            menu_permissao.click()
+        time.sleep(3)
+        logging.info(f"✅ Sucesso: {usuario}")
 
-            grupo = "Grupo de Permissão"
+    except Exception as e:
+        logging.error(f"❌ Erro ao processar {usuario}.")
+        logging.error(traceback.format_exc())
 
-            grupo_valor = "grupo"
-            print(f"11. Selecionando a opção: {grupo_valor}...")
 
-            xpath_opcao_ativa = f"//div[contains(@class, 'md-active')]//md-option[@value='{grupo_valor}']"
+def alterar_permissao(driver, wait, nome_permissao):
+    logging.info("Alterando Permissões...")
 
-            time.sleep(1)
+    # Clicar na aba Permissões
+    btn_perm = driver.find_element(By.XPATH, "//button[@aria-label='PERMISSÕES']")
+    driver.execute_script("arguments[0].click();", btn_perm)
+    time.sleep(1)
 
-            try:
-                opcao_correta = wait.until(
-                    EC.element_to_be_clickable((By.XPATH, xpath_opcao_ativa))
-                )
-                opcao_correta.click()
+    # Menu Tipo
+    menu_tipo = driver.find_element(By.XPATH, "//md-select[@name='tipo_permissao']")
+    driver.execute_script("arguments[0].click();", menu_tipo)
+    time.sleep(0.5)
 
-            except Exception as e:
-                print("Clique nativo falhou, forçando via JavaScript...")
-                opcao_correta = driver.find_element(By.XPATH, xpath_opcao_ativa)
-                driver.execute_script("arguments[0].click();", opcao_correta)
+    opcao_grupo = driver.find_element(By.XPATH, "//md-option[@value='grupo']")
+    driver.execute_script("arguments[0].click();", opcao_grupo)
+    time.sleep(1)
 
-            print(f"Sucesso: Opção '{grupo_valor}' selecionada.")
+    # Menu Grupo
+    menu_grupo = driver.find_element(
+        By.XPATH, "//md-select[@name='Grupo de Permissão']"
+    )
+    driver.execute_script("arguments[0].click();", menu_grupo)
+    time.sleep(0.5)
 
-            time.sleep(2)
+    # Pesquisa dentro do select
+    try:
+        search_grupo = driver.find_element(
+            By.XPATH, "//div[contains(@class, 'md-active')]//input[@type='search']"
+        )
+        search_grupo.send_keys(nome_permissao)
+        time.sleep(1)
 
-            print("12. Abrindo menu de Grupo de Permissão...")
-            menu_permissao = wait.until(
-                lambda d: [
-                    el
-                    for el in d.find_elements(
-                        By.XPATH, "//md-select[@name='Grupo de Permissão']"
-                    )
-                    if el.is_displayed()
-                ][0]
-            )
+        botao_final = driver.find_element(
+            By.XPATH,
+            f"//div[contains(@class, 'md-active')]//md-option[contains(., '{nome_permissao}')]",
+        )
+        driver.execute_script("arguments[0].click();", botao_final)
+    except:
+        logging.warning(
+            "Não foi possivel filtrar o grupo, tentando clicar direto se visivel."
+        )
 
-            menu_permissao.click()
 
-            print("Menu de Grupo de Permissão aberto corretamente.")
+def main():
+    EMAIL = os.getenv("HUBSOFT_EMAIL")
+    SENHA = os.getenv("HUBSOFT_SENHA")
+    NOVA_SENHA = "Mudar@1243!!"
 
-            nome_do_item = "Setor Suporte"
-            print(f"13. Pesquisando e Selecionando: {nome_do_item}...")
+    USUARIOS = [
+        "Teste de Grupos TI",
+        "HubSoft TI",
+    ]
 
-            try:
-                campo_filtro = wait.until(
-                    EC.element_to_be_clickable(
-                        (
-                            By.XPATH,
-                            "//div[contains(@class, 'md-active')]//input[@type='search']",
-                        )
-                    )
-                )
-                campo_filtro.click()
-                campo_filtro.send_keys(Keys.CONTROL + "a")
-                campo_filtro.send_keys(Keys.BACKSPACE)
-                campo_filtro.send_keys(nome_do_item)
+    driver = configurar_driver(headless=False)
+    wait = WebDriverWait(driver, 25)
+    action = ActionChains(driver)  # Restaurado ActionChains
 
-                time.sleep(2)
+    try:
+        realizar_login(driver, wait, email=EMAIL, senha=SENHA)
 
-                xpath_botao = f"//div[contains(@class, 'md-active')]//button[@aria-label='{nome_do_item}']"
+        for usuario in USUARIOS:
+            processar_usuario(driver, wait, action, usuario, NOVA_SENHA)
 
-                sucesso = False
-                for tentativa in range(3):
-                    try:
-                        botao_final = wait.until(
-                            EC.presence_of_element_located((By.XPATH, xpath_botao))
-                        )
+    finally:
+        input("\nPressione Enter para encerrar...")
+        driver.quit()
 
-                        driver.execute_script(
-                            "arguments[0].scrollIntoView({block: 'center'});",
-                            botao_final,
-                        )
-                        time.sleep(0.5)
 
-                        driver.execute_script("arguments[0].click();", botao_final)
-
-                        print(f"Tentativa {tentativa + 1}: Clique disparado.")
-                        sucesso = True
-                        break
-                    except Exception as e:
-                        print(
-                            f"Tentativa {tentativa + 1} falhou, tentando novamente..."
-                        )
-                        time.sleep(1)
-
-                if not sucesso:
-                    raise Exception("Não foi possível clicar no item após a pesquisa.")
-
-            except Exception as e:
-                print(f"Erro fatal no Passo 13: {e}")
-
-            print("14. Finalizando: Clicando no botão Salvar...")
-            xpath_salvar = "//button[@type='submit' and @ng-click='vm.save()']"
-
-            botao_salvar = wait.until(
-                EC.element_to_be_clickable((By.XPATH, xpath_salvar))
-            )
-
-            driver.execute_script(
-                "arguments[0].scrollIntoView({block: 'center'});", botao_salvar
-            )
-            time.sleep(0.5)
-
-            try:
-                botao_salvar.click()
-                time.sleep(2)
-            except:
-                driver.execute_script("arguments[0].click();", botao_salvar)
-
-            print(f"✅ Usuário '{nome_usuario}' atualizado com sucesso.")
-
-        except Exception as e:
-            print(f"❌ Erro ao processar usuário {nome_usuario}: {e}")
-
-except Exception as e:
-    print("\n" + "!" * 60)
-    print("ERRO CRÍTICO NO FLUXO PRINCIPAL")
-    traceback.print_exc()
-
-finally:
-    if not MODO_HEADLESS:
-        input("\nPressione Enter para fechar o navegador...")
-    driver.quit()
+if __name__ == "__main__":
+    main()
