@@ -1,6 +1,5 @@
 import os
 import time
-import pickle
 import logging
 import openpyxl
 from dotenv import load_dotenv
@@ -11,7 +10,6 @@ from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
-from selenium.common.exceptions import TimeoutException
 
 load_dotenv()
 
@@ -35,28 +33,6 @@ def configurar_driver(headless=False):
     return driver
 
 
-def salvar_cookies(driver, arquivo="cookies.pkl"):
-    with open(arquivo, "wb") as f:
-        pickle.dump(driver.get_cookies(), f)
-    logging.info("Cookies salvos com sucesso!")
-
-
-def carregar_cookies(driver, arquivo="cookies.pkl"):
-    if os.path.exists(arquivo):
-        try:
-            logging.info("Carregando cookies salvos...")
-            driver.get("https://directinternet.hubsoft.com.br")
-            with open(arquivo, "rb") as f:
-                cookies = pickle.load(f)
-                for cookie in cookies:
-                    driver.add_cookie(cookie)
-            driver.refresh()
-            return True
-        except Exception:
-            return False
-    return False
-
-
 def esperar_e_clicar(wait, driver, by, value, nome_elemento):
     try:
         logging.info(f"--- Clicando em: {nome_elemento}")
@@ -74,14 +50,6 @@ def esperar_e_clicar(wait, driver, by, value, nome_elemento):
 
 
 def realizar_login(driver, wait, email, senha):
-    if carregar_cookies(driver):
-        try:
-            wait.until(EC.url_contains("/dashboard"))
-            logging.info("Login via Cookies realizado!")
-            return
-        except TimeoutException:
-            logging.warning("Cookies expirados.")
-
     try:
         logging.info("Realizando login manual...")
         driver.get("https://directinternet.hubsoft.com.br/login")
@@ -104,7 +72,6 @@ def realizar_login(driver, wait, email, senha):
 
         logging.info("\n--- REALIZE O 2FA NO NAVEGADOR AGORA ---\n")
         wait.until(EC.url_contains("/dashboard"))
-        salvar_cookies(driver)
         logging.info("Login confirmado.")
     except Exception as e:
         logging.error(f"Erro login: {e}")
@@ -158,6 +125,31 @@ def alterar_setor_dinamico(driver, wait, action, nome_setor):
 
     time.sleep(0.5)
     action.send_keys(Keys.ESCAPE).perform()
+
+
+def desativar_vendedor(driver, wait):
+    logging.info("Verificando status do botão Vendedor...")
+    try:
+        switch_vendedor = wait.until(
+            EC.presence_of_element_located((By.XPATH, "//md-switch[@name='vendedor']"))
+        )
+        estado_atual = switch_vendedor.get_attribute("aria-checked")
+
+        if estado_atual == "true":
+            logging.info("A opção Vendedor está ativada. Desativando...")
+            driver.execute_script(
+                "arguments[0].scrollIntoView({block: 'center'});", switch_vendedor
+            )
+            time.sleep(0.5)
+            driver.execute_script("arguments[0].click();", switch_vendedor)
+        else:
+            logging.info(
+                "A opção Vendedor já está desativada. Nenhuma ação necessária."
+            )
+
+        time.sleep(0.5)
+    except Exception as e:
+        logging.warning(f"Erro ao interagir com o botão Vendedor: {e}")
 
 
 def alterar_permissao_dinamica(driver, wait, nome_permissao):
@@ -298,6 +290,9 @@ def processar_usuario(driver, wait, action, nome_usuario):
         campo_confirma.send_keys(NOVA_SENHA)
 
         alterar_setor_dinamico(driver, wait, action, CONFIG["SETOR_ALVO"])
+
+        desativar_vendedor(driver, wait)
+
         alterar_permissao_dinamica(driver, wait, CONFIG["SETOR_ALVO"])
 
         logging.info("Salvando...")
